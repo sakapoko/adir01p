@@ -9,6 +9,7 @@
 #define EP_4_IN  0x84
 #define EP_4_OUT 0x04
 #define PACKET_SIZE 64
+#define USB_TIMEOUT 0
 
 int verbose = 0;
 int frequency = 38000;
@@ -86,12 +87,12 @@ unsigned char *send_remocon(unsigned char *cmd, int len) {
     printf("write data\n");
     dump_data(remocon.buf, PACKET_SIZE);
   }
-  if (libusb_interrupt_transfer(remocon.device, EP_4_OUT, remocon.buf, PACKET_SIZE, &size, 1000) < 0) {
+  if (libusb_interrupt_transfer(remocon.device, EP_4_OUT, remocon.buf, PACKET_SIZE, &size, USB_TIMEOUT) < 0) {
     perror("usb write");
     return NULL;
   }
   memset(remocon.buf, 0x00, PACKET_SIZE);
-  if (libusb_interrupt_transfer(remocon.device, EP_4_IN, remocon.buf, PACKET_SIZE, &size, 1000) < 0) {
+  if (libusb_interrupt_transfer(remocon.device, EP_4_IN, remocon.buf, PACKET_SIZE, &size, USB_TIMEOUT) < 0) {
     perror("usb read");
     return NULL;
   }
