@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 #include <libusb-1.0/libusb.h>
 
 #define VENDOR_ID  0x22ea
@@ -10,11 +11,13 @@
 #define EP_4_OUT 0x04
 #define PACKET_SIZE 64
 #define USB_TIMEOUT 0
+#define RECEIVE_TIMEOUT 5
 
 int verbose = 0;
 int frequency = 38000;
 unsigned char irdata[9600];
 int irdata_size = 0;
+volatile sig_atomic_t receiving = 0;
 
 struct {
   libusb_context *context;
@@ -100,6 +103,10 @@ unsigned char *send_remocon(unsigned char *cmd, int len) {
     printf("read data\n");
     dump_data(remocon.buf, PACKET_SIZE);
   }
+  if (cmd[0] != remocon.buf[0]) {
+    fprintf(stderr, "response error\n");
+    return NULL;
+  }
   return remocon.buf;
 }
 
@@ -111,7 +118,7 @@ void close_remocon() {
 
 int command_version()
 {
-  unsigned char cmd[PACKET_SIZE];
+  unsigned char cmd[1];
   unsigned char *ret;
 
   cmd[0] = 0x56;
@@ -173,6 +180,30 @@ void command_receive_result()
   } while (total > 0 && total > pos + size && size > 0);
 }
 
+int command_receive_sample()
+{
+  unsigned char cmd[1];
+  unsigned char *ret;
+  int size,total,pos;
+
+  irdata_size = 0;
+  do {
+    cmd[0] = 0x37;
+    if (ret = send_remocon(cmd, 1)) {
+      total = (ret[1] << 8) + ret[2];
+      if (total == 0)
+        break;
+      size = ret[5];
+      pos = (ret[3] << 8) + ret[4];
+      memcpy(irdata + irdata_size, ret + 6, size * 4);
+      irdata_size += size * 4;
+    } else {
+      return -1;
+    }
+  } while (total > 0 && total > pos + size && size > 0);
+  return total;
+}
+
 int command_set_data()
 {
   unsigned char cmd[PACKET_SIZE];
@@ -229,7 +260,9 @@ int read_datafile(char *file)
   FILE *fp;
 
   irdata_size = 0;
-  if ((fp = fopen(file, "r")) == NULL) {
+  if (file[0] == '-') {
+    fp = stdin;
+  } else if ((fp = fopen(file, "r")) == NULL) {
     return -1;
   }
   while (fgets(buf, 12000, fp)) {
@@ -247,6 +280,7 @@ int read_datafile(char *file)
         irdata_size = strlen(buf) / 2;
     }
   }
+  fclose(fp);
   return 0;
 }
 
@@ -261,14 +295,47 @@ void print_result()
   printf("\n");
 }
 
+void alarm_handler(int signum)
+{
+  fprintf(stderr, "receive timeout\n");
+  receiving = -1;
+}
+
+int wait_received()
+{
+  receiving = 1;
+  signal(SIGALRM, alarm_handler);
+  alarm(RECEIVE_TIMEOUT);
+  do {
+    int len = command_receive_sample();
+    if (len > 0) {
+      if (verbose) {
+        print_result();
+      }
+      if ((irdata[irdata_size - 2] == 0x7f) && (irdata[irdata_size - 1] == 0xff)) {
+        receiving = 0;
+      }
+    } else if (len < 0) {
+      fprintf(stderr, "receive error\n");
+      return -1;
+    }
+  } while (receiving > 0);
+  alarm(0);
+  return receiving;
+}
+
 int main(int argc, char *argv[]) {
   int opt;
   char file[1024];
   int mode = 0;
+  int display_version = 0;
 
-  while ((opt = getopt(argc, argv, "vrt:f:")) != -1) {
+  while ((opt = getopt(argc, argv, "vdrt:f:")) != -1) {
     switch(opt) {
       case 'v':
+        display_version = 1;
+        break;
+      case 'd':
         verbose = 1;
         break;
       case 'r':
@@ -289,11 +356,13 @@ int main(int argc, char *argv[]) {
   if (open_remocon() < 0) {
     exit(1);
   }
-  //command_version();
+  if (display_version)
+    command_version();
   switch (mode) {
     case 1:
       if (command_receive_start() == 0) {
-        sleep(3);
+        if (wait_received() < 0)
+          exit(1);
         if (command_receive_stop() == 0) {
           command_receive_result();
           print_result();
